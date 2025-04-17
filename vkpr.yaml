@@ -1,0 +1,42 @@
+global:
+  domain: vee.codes
+  secure: true 
+  provider: aws
+  ingressClassName: kong
+cert-manager:
+  hostedZoneID: Z07940991R8A4LWFFEA2Z
+  enabled: true
+  email: email@sample.com
+  issuer:
+    type: "production"
+    solver: "DNS01"
+external-dns:
+  enabled: true
+kong:
+  enabled: true
+  basic_auth: true
+  mode: standard
+  helmArgs:
+    env:
+      tracing_instrumentations: all
+      tracing_sampling_rate: 1.0
+  metrics: true  
+prometheus-stack:
+  enabled: true
+  helmArgs:
+    prometheus:
+      prometheusSpec:
+        enableRemoteWriteReceiver: true
+        remoteWrite:
+        - name: prometheus-central
+          sendExemplars: true
+          url: http://prometheus.apr.vee.codes/api/v1/write
+          writeRelabelConfigs:
+          - regex: (.+)
+            # replacement: Will be filled in the pipeline ex.: platform_xpto_$1 
+            sourceLabels:
+            - __name__
+            targetLabel: __name__
+        externalLabels:
+          cluster: hml-ec2-test
+          # replacement:   Will be filled in the pipeline ex.: xpto

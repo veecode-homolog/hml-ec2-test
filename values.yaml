@@ -1,0 +1,36 @@
+values:
+    ### Enviroment Settings
+    environment: platform_environment
+    ### Project Settings
+    cluster_name: hml-ec2-test
+    owner: group:default/admin
+    instance_type: t3.medium
+    volume_size: 30
+    keypair_name: platform_kp
+    ### Network Settings
+    vpc_id: vpc-0c9a26cb94ad9d3c6
+    domain: vee.codes
+    hostedZoneId: Z07940991R8A4LWFFEA2Z
+    subnet_id: subnet-0ab60ab4844728a00
+    ### Ingress Settings
+    ingress_window: true
+    ingress_type: kong
+    kong_mode: standard
+    external_db: false
+    basic_auth: true
+    certmanager_window: true
+    issuer_type: production
+    email: email@sample.com
+    ### Terraform Backend Settings
+    terraformStateBucketName: bucket-homolog-devportal-veecode
+    terraformStateBucketRegion: us-east-1
+    infracost: true
+    ### Publish Settings
+    host: github.com
+    destination: veecode-homolog/hml-ec2-test
+    specPublish: ${{ parameters.specPublish | parseRepoUrl | pick('owner') }}/${{ parameters.specPublish | parseRepoUrl | pick('repo') }}
+    specPublishRepo: ${{ parameters.specPublish | parseRepoUrl | pick('repo') }}
+    specPublishBranch: 
+    ### Observability Settings
+    observability_window: true
+    observability_grafana_url: https://grafana.apr.vee.codes

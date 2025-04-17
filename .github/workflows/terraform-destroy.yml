@@ -1,0 +1,100 @@
+name: Destroy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  init:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: hashicorp/setup-terraform@v2
+      - uses: actions/cache@v3
+        with:
+          path: |
+            .terraform/**
+            .terraform.lock.hcl
+            plan.cache
+          key: terraform-lock-${{ steps.extract_branch.outputs.branch }}
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Terraform Init Persistent
+        id: init_persistent
+        run: |
+            cd ./persistent
+            cat main.tf 
+            terraform init
+      - name: Terraform Init Disposable
+        id: init_disposable
+        run: |
+            cd ./disposable
+            cat main.tf 
+            terraform init
+  destroy:
+    runs-on: ubuntu-latest
+    needs: init
+#    if: false
+    steps:
+      - uses: actions/checkout@v3
+      - uses: hashicorp/setup-terraform@v2
+#        with:
+#          terraform_version: 1.3.0
+#          cli_config_credentials_token: 
+      - name: Extract branch name
+        shell: bash
+        run: echo "##[set-output name=branch;]$(echo ${GITHUB_REF#refs/heads/})"
+        id: extract_branch
+      - uses: actions/cache@v3
+        with:
+          path: |
+            .terraform/**
+            .terraform.lock.hcl
+            plan.cache
+          key: terraform-lock-${{ github.event.workflow_run.head_branch }}
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Terraform destroy Disposable
+        id: destroy_disposable
+        run: |
+          cd ./disposable
+          terraform init
+          terraform destroy -auto-approve
+          
+      - name: Terraform destroy Persistent
+        id: destroy_persistent
+        run: |
+          cd ./persistent
+          terraform init
+          terraform destroy -auto-approve
+      #DELETE Dashboards on Grafana API
+      - name: Delete Dashboards from project
+        run: |
+          TAG="hml-ec2-test"
+          # Passo 1: Verificar se existem painéis com a tag específica
+          response=$(curl -s -o /dev/null -w "%{http_code}" -X GET "https://grafana.apr.vee.codes/api/search?tag=${TAG}" -H "Authorization: Bearer ${{ secrets.GRAFANA_API_TOKEN }}")
+          if [ "$response" -ne 200 ]; then
+              echo "Não foram encontrados painéis com a tag '${TAG}'. Nenhum painel será excluído."
+              exit 0
+          fi
+          # Passo 2: Obter lista de UIDs dos painéis com a tag específica
+          panel_uids=$(curl -s -X GET "https://grafana.apr.vee.codes/api/search?tag=${TAG}" -H "Authorization: Bearer ${{ secrets.GRAFANA_API_TOKEN }}" | jq -r '.[] | .uid')
+          
+          # Passo 3: Excluir cada painel obtido no passo 1
+          for panel_uid in $panel_uids; do
+              response=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "https://grafana.apr.vee.codes/api/dashboards/uid/${panel_uid}" -H "Authorization: Bearer ${{ secrets.GRAFANA_API_TOKEN }}")
+              if [ "$response" -eq 200 ]; then
+                  echo "Painel com ID ${panel_uid} excluído com sucesso."
+              else
+                  echo "Erro ao excluir o painel com UID ${panel_uid}. Status code: ${response}"
+              fi
+          done

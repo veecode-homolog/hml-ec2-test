@@ -1,0 +1,252 @@
+name: Create
+
+on:
+  workflow_dispatch:
+env:
+  PORT: 6550
+  USERNAME: ec2-user
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: hashicorp/setup-terraform@v2
+      - name: Extract branch name
+        shell: bash
+        run: echo "##[set-output name=branch;]$(echo ${GITHUB_REF#refs/heads/})"
+        id: extract_branch
+      - uses: actions/cache@v3
+        with:
+          path: |
+            .terraform/**
+            .terraform.lock.hcl
+            plan.cache
+          key: terraform-lock-${{ github.event.workflow_run.head_branch }}
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          
+      - name: Terraform plan Persistent
+        id: plan_persistent
+        run: |
+          cd ./persistent
+          terraform init
+          terraform plan -no-color -out plan_cache.json 
+
+      - name: Terraform apply Persistent
+        run: |
+          cd ./persistent
+          terraform apply -input=false -no-color -auto-approve plan_cache.json
+
+      - name: Terraform plan Disposable
+        id: plan_disposable
+        run: |
+          cd ./disposable
+          terraform init
+          terraform plan -no-color -out plan_cache.json 
+
+      - name: Terraform apply Disposable
+        run: |
+          cd ./disposable
+          terraform apply -input=false -no-color -auto-approve plan_cache.json       
+
+  kubeconfig:
+    runs-on: ubuntu-latest
+    needs: apply
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v3
+      - uses: hashicorp/setup-terraform@v2
+      - name: Write secret to file
+        run: |
+          echo "${{ secrets.KEYPAIR }}" > cert.pem
+          chmod 600 cert.pem
+          
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Waiting for cluster to be ready
+        run: |
+          HOST=`aws ec2 describe-instances --filters 'Name=tag:Name,Values=hml-ec2-test'   --output text --query 'Reservations[*].Instances[*].PublicIpAddress'`
+          while ! nc -z $HOST $PORT; do
+            echo "waiting for cluster to be ready..."
+            sleep 2
+          done
+          echo "Cluster Ready!"
+          echo "Host=$HOST" >> $GITHUB_ENV
+
+      - name: Generate kube config with k3d
+        run: |
+           ssh -i ./cert.pem -o StrictHostKeyChecking=no $USERNAME@${{  env.Host }} "mkdir -p .kube && k3d kubeconfig get k3s > ~/.kube/config"
+ 
+      - name: Download kube config
+        run: |
+           mkdir -p ~/.kube
+           scp -i ./cert.pem -o StrictHostKeyChecking=no $USERNAME@${{ env.Host }}:~/.kube/config ~/.kube/config
+ 
+      - name: Print downloaded config
+        run: |  
+          CERTIFICATE=`cat  ~/.kube/config |grep certificate-authority-data `
+          sed -i "s|$CERTIFICATE|    insecure-skip-tls-verify: true|g" ~/.kube/config
+          sed -i "s|0.0.0.0|${{ env.Host }}|g" ~/.kube/config
+
+ 
+      - name: Upload kube config
+        uses: actions/upload-artifact@v4
+        with:
+          name: kube-config
+          path: ~/.kube/config
+
+      - name: Write Catalogo Info
+        run: |
+          yq e '.metadata.environment.public_ip = "${{ env.Host }}"' -i .platform/component.yaml
+          yq -e '.metadata.annotations["cluster/instructions"] = "# Run the following commands to import the kubeconfig:
+            ssh -i ./cert.pem -o StrictHostKeyChecking=no $USERNAME@$${{ env.Host }} \"mkdir -p .kube && k3d kubeconfig get k3s > ~/.kube/config\"
+            scp -i ./cert.pem $USERNAME@$${{ env.Host }}:~/.kube/config ~/.kube/config-hml-ec2-test
+            yq -e '\''del(.clusters[0].cluster.certificate-authority-data) | .clusters[0].cluster.insecure-skip-tls-verify=true | .clusters[].cluster.server |= sub(\"0.0.0.0\", \"${{ env.Host }}\")'\'' -i ~/.kube/config-hml-ec2-test
+            export KUBECONFIG=~/.kube/config-hml-ec2-test
+            kubectl get pods -A
+          "' -i .platform/component.yaml
+          cat ./.platform/component.yaml
+
+      - name: Temporarily disable branch protection
+        uses: benjefferies/branch-protection-bot@master
+        if: always()
+        with:
+          access_token: ${{ secrets.API_TOKEN_GITHUB }}
+          branch: ${{ github.event.repository.default_branch }}
+
+      - name: Publish catalog info
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          repository: ".platform/"
+          commit_user_name: veecode-bot
+          commit_user_email: github-admin@vee.codes
+          commit_author: veecode-bot<github-admin@vee.codes>
+          commit_message: "Update catalog-info.yaml with RDS endpoint"
+          push_options: '--force'
+  vkpr-apply:
+    runs-on: ubuntu-latest
+    needs: kubeconfig
+    steps:
+      - uses: actions/checkout@v3
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY}}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY}}
+          aws-region: ${{ secrets.AWS_REGION}}
+          
+      - name: Install Vkpr
+        shell: bash
+        run: |
+          curl -fsSL https://get.vkpr.net/ | CONTROL_SKIP="true" bash
+          rit update repo --name="vkpr-cli" --version=1.3.9
+
+      - name: Install yq
+        run: |
+          wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          chmod a+x /usr/local/bin/yq
+          yq --version 
+
+      ### Configure VKPR Credentials
+      - name: config vkpr credentials
+        env:
+          MODE: "standard"
+        shell: bash
+        run: |
+            rit set credential --provider="aws" \
+                --fields="accesskeyid,region,secretaccesskey" \
+                --values="${{ secrets.AWS_ACCESS_KEY }},${{ secrets.AWS_REGION }},${{ secrets.AWS_SECRET_KEY }}" 
+            if [ '$MODE' != 'dbless' ]; then
+              POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+              if [ -n "$POSTGRES_PASSWORD" ]; then
+                rit set credential --provider="postgres" \
+                --fields="password,service" \
+                --values="${{ secrets.POSTGRES_PASSWORD }},postgres" 
+              fi
+            fi  
+            
+    ### Configure VKPR Prometheus prefix and labels
+      - name: Configure VKPR Prometheus prefix and labels
+        shell: bash
+        run: |
+          export RANDOM_LETTERS=$(cat /dev/urandom | tr -dc 'a-z' | head -c 5)
+          export REPLACEMENT="\"platform_${RANDOM_LETTERS}_\$1\""
+          yq eval ".prometheus-stack.helmArgs.prometheus.prometheusSpec.remoteWrite[0].writeRelabelConfigs[0].replacement=$REPLACEMENT" -i $(pwd)/vkpr.yaml 
+          yq eval ".prometheus-stack.helmArgs.prometheus.prometheusSpec.externalLabels.replacement=$REPLACEMENT" -i $(pwd)/vkpr.yaml
+          sed -i "s/OBSERVABILITY_REPLACEMENT_LABEL/platform_$RANDOM_LETTERS/g" dashboard-overview.json  
+
+    ### Usin k8s context
+      - name: Download kubeconfig artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: kube-config
+          path: ~/.kube
+
+    ### Provisionamento (Prometheus with remote write)
+      - name: Vkpr apply
+        run: |
+          shopt -s expand_aliases
+          alias vkpr="rit vkpr"
+          vkpr apply --path_to_file="$(pwd)/vkpr.yaml"
+
+            
+      # Getting the UID from datasources
+      - name: Getting uid from Prometheus datasource
+        run: |
+          export UID_METRICS_DASHBOARD=$(curl -H "Authorization: Bearer ${{ secrets.GRAFANA_API_TOKEN }}" --url https://grafana.apr.vee.codes/api/datasources | jq '.[] | select(.type == "prometheus")'.uid)
+          echo "UID_METRICS = $UID_METRICS_DASHBOARD" 
+          if [ -z "$UID_METRICS_DASHBOARD" ]; then
+              echo "Error: The UID is empty. There may have been an issue."
+              exit 1
+          else
+              echo "UID found: $UID_METRICS_DASHBOARD"
+          fi          
+          echo "UID_METRICS=$UID_METRICS_DASHBOARD" >> $GITHUB_ENV
+
+      # Change UID from defaults dashboard
+      - name: Changing uid of dashboard from Prometheus
+        run: |
+          jq '(.dashboard.panels[].datasource | select(.type == "prometheus")).uid |= ${{ env.UID_METRICS }}' "dashboard-overview.json" > hml-ec2-test-dashboard-overview.json
+          cat hml-ec2-test-dashboard-overview.json
+
+      #DELETE old Dashboards on Grafana API
+      - name: Delete old Dashboards from project
+        run: |
+          TAG="hml-ec2-test"
+          # Passo 1: Verificar se existem painéis com a tag específica
+          response=$(curl -s -o /dev/null -w "%{http_code}" -X GET "https://grafana.apr.vee.codes/api/search?tag=${TAG}" -H "Authorization: Bearer ${{ secrets.GRAFANA_API_TOKEN }}")
+          if [ "$response" -ne 200 ]; then
+              echo "Não foram encontrados painéis com a tag '${TAG}'. Nenhum painel será excluído."
+              exit 0
+          fi
+          # Passo 2: Obter lista de UIDs dos painéis com a tag específica
+          panel_uids=$(curl -s -X GET "https://grafana.apr.vee.codes/api/search?tag=${TAG}" -H "Authorization: Bearer ${{ secrets.GRAFANA_API_TOKEN }}" | jq -r '.[] | .uid')
+          
+          # Passo 3: Excluir cada painel obtido no passo 1
+          for panel_uid in $panel_uids; do
+              response=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "https://grafana.apr.vee.codes/api/dashboards/uid/${panel_uid}" -H "Authorization: Bearer ${{ secrets.GRAFANA_API_TOKEN }}")
+              if [ "$response" -eq 200 ]; then
+                  echo "Painel com ID ${panel_uid} excluído com sucesso."
+              else
+                  echo "Erro ao excluir o painel com UID ${panel_uid}. Status code: ${response}"
+              fi
+          done
+          
+      #POST Dashboards on Grafana API
+      - name: Post Overview dashboard
+        run: |
+          curl -X POST -d @hml-ec2-test-dashboard-overview.json \
+          -H "Accept: application/json" \
+          -H "Content-Type: application/json" \
+          -H "Authorization: Bearer ${{ secrets.GRAFANA_API_TOKEN }}" \
+          --url https://grafana.apr.vee.codes/api/dashboards/db
