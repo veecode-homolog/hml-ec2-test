@@ -5,7 +5,8 @@ metadata:
   environment:
     cluster_type: ec2
     domain: vee.codes
-    ingress_type: kong  
+    ingress_type: kong
+    public_ip: 3.217.41.254
   annotations:
     github.com/project-slug: veecode-homolog/hml-ec2-test
     backstage.io/techdocs-ref: dir:..
@@ -13,16 +14,9 @@ metadata:
     grafana/dashboard-selector: hml-ec2-test
     grafana/alert-label-selector: "alertname=hml-ec2-test"
     infracost/project: hml-ec2-test
-    cluster/instructions: |
-      ssh -i ./key-pair.pem -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} 
-      "mkdir -p .kube && k3d kubeconfig get ${CLUSTER_NAME} > ~/.kube/config"
-      scp -i ./key-pair.pem ${EC2_USER}@${EC2_HOST}:~/.kube/config ./config
-      yq e 'del(.clusters[0].cluster.certificate-authority-data)' -i ~/.kube/config
-      yq e '.clusters[0].cluster.insecure-skip-tls-verify=true' config -i
-      yq e '.clusters[0].cluster.server = "https://${EC2_HOST}:38517"' config -i
+    cluster/instructions: "# Run the following commands to import the kubeconfig:\n  ssh -i ./cert.pem -o StrictHostKeyChecking=no $USERNAME@$3.217.41.254 \"mkdir -p .kube && k3d kubeconfig get k3s > ~/.kube/config\"\n  scp -i ./cert.pem $USERNAME@$3.217.41.254:~/.kube/config ~/.kube/config-hml-ec2-test\n  yq -e 'del(.clusters[0].cluster.certificate-authority-data) | .clusters[0].cluster.insecure-skip-tls-verify=true | .clusters[].cluster.server |= sub(\"0.0.0.0\", \"3.217.41.254\")' -i ~/.kube/config-hml-ec2-test\n  export KUBECONFIG=~/.kube/config-hml-ec2-test\n  kubectl get pods -A\n"
 spec:
   type: ec2
   lifecycle: experimental
   owner: "group:default/admin"
   environment: 'environment:default/platform_environment'
-  
