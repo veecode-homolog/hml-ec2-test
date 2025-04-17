@@ -1,0 +1,12 @@
+apiVersion: veecode.backstage.io/v1alpha1
+kind: Infracost
+metadata:
+  name: hml-ec2-test
+  annotations:
+   backstage.io/techdocs-ref: dir:.
+spec:
+  type: FinOps
+  lifecycle: experimental
+  owner: "group:default/admin"
+  estimate:
+   $text: ./infracost-base.json
